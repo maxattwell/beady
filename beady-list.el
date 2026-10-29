@@ -1811,6 +1811,7 @@ displaying it there."
        ("t" "Toggle all marks" beady-list-toggle-marks)]
       ["Other"
        ("c" "Create a bead…" beady-create-menu)
+       ("S" "Sync & remotes…" beady-sync-menu)
        ("w" "Copy ID" beady-copy-id)
        ("W" "Wide/compact columns" beady-list-toggle-column-profile)
        ("h" "Legend of icons" beady-list-show-legend)]]
@@ -1889,6 +1890,7 @@ The menu uses the key bindings of the active editing state."
   "C" #'beady-add-comment
   "e" #'beady-edit-menu
   "c" #'beady-create-menu
+  "S" #'beady-sync-menu
   "w" #'beady-copy-id)
 
 (define-derived-mode beady-list-mode special-mode "Beady"

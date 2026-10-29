@@ -548,6 +548,7 @@ Each related bead is a cons (DEPENDENCY-TYPE . DATA)."
     ("C" "Comment…" beady-add-comment)]
    ["Other"
     ("c" "Create a bead…" beady-create-menu)
+    ("S" "Sync & remotes…" beady-sync-menu)
     ("w" "Copy ID" beady-copy-id)
     ("g" "Refresh" beady-show-refresh)]])
 
@@ -577,6 +578,7 @@ Each related bead is a cons (DEPENDENCY-TYPE . DATA)."
   "e" #'beady-edit-menu
   "C" #'beady-add-comment
   "c" #'beady-create-menu
+  "S" #'beady-sync-menu
   "w" #'beady-copy-id)
 
 (define-derived-mode beady-show-mode special-mode "Beady-Show"

@@ -80,6 +80,11 @@ comment and dependency counts; labels and assignees are shown as `#tag` and
   and blockers. Comments and longer text are written in a Markdown compose
   buffer. New beads can be created with type, priority, labels, parent and
   so on.
+- **Dolt sync and version control** (`S`): run `bd sync` asynchronously
+  (pull, conflict check, recompute blocked flags and push), raw `bd dolt
+  pull` (`F`) and `bd dolt push` (`P`), commit pending changes, manage Dolt
+  remotes, view version control status and inspect or resolve merge
+  conflicts.
 - **Bulk actions:** every change applies to the marked beads (`m`), to the
   region or evil visual selection, or else to the bead at point.
 - **Evil support** follows the conventions of evil-collection (`gr`, `za`,
@@ -204,6 +209,7 @@ Other entry points:
 | `e`             | `e`                   | Edit menu (text fields, type, dates, relations)|
 | `C`             | `C`                   | Comment                                        |
 | `c`             | `c`                   | Create menu                                    |
+| `S`             | `S`                   | Sync & remotes menu (`s` sync, `F` pull, `P` push)|
 | `w`             | `yy` / `yt`           | Copy ID / copy title                           |
 | `q`             | `q`, `ZZ`             | Quit window                                    |
 
@@ -272,7 +278,7 @@ icons, so beady does not invent any.
 | `^`          | `^`, `gu`                 | Go to the parent                |
 | `j`          | `gl`                      | Jump to the bead in the list    |
 | `g`          | `gr`                      | Refresh                         |
-| `s` `x` `P` `a` `L` `e` `C` `c` | same       | Same actions as in the list     |
+| `s` `x` `P` `a` `L` `e` `C` `c` `S` | same   | Same actions as in the list     |
 | `w`          | `yy` / `yt`               | Copy ID / title                 |
 | `q`          | `q`, `ZZ`                 | Quit window                     |
 

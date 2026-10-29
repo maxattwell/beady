@@ -801,6 +801,389 @@ The first line is the title, the rest the description."
    ("c" "Create with a title" beady-create)
    ("C" "Create with title and description…" beady-create-with-description)])
 
+;;;; Synchronization and version control
+
+(defun beady--remotes (&optional root)
+  "Return the parsed `bd dolt remote list' entries of ROOT, or nil."
+  (let ((default-directory (or root (beady--current-root))))
+    (condition-case nil
+        (let ((json (beady--run-json '("dolt" "remote" "list"))))
+          (and (beady--json-array-p json) json))
+      (beady-error nil))))
+
+(defun beady--transient-read-remote (prompt initial _history)
+  "Read a Dolt remote name for transient with PROMPT and INITIAL."
+  (completing-read prompt (mapcar (lambda (r) (alist-get 'name r)) (beady--remotes))
+                   nil nil initial))
+
+(defun beady--sync-args ()
+  "Return the active transient arguments of `beady-sync-menu'."
+  (and (eq transient-current-command 'beady-sync-menu)
+       (transient-args 'beady-sync-menu)))
+
+(defun beady--sync-option (args prefix)
+  "Return the option in ARGS starting with PREFIX, or nil."
+  (seq-find (lambda (arg) (string-prefix-p prefix arg)) args))
+
+(defun beady--format-sync-result (json)
+  "Return a one-line summary of the `bd sync --json' payload JSON."
+  (let ((status (and (listp json) (consp (car-safe json)) (alist-get 'status json)))
+        (pulled (and (listp json) (alist-get 'pulled json)))
+        (pushed (and (listp json) (alist-get 'pushed json)))
+        (corrected (and (listp json) (alist-get 'rows_corrected json))))
+    (pcase status
+      ("no-remote" "Beads sync: no remote configured")
+      ("ok"
+       (let ((parts nil))
+         (when pulled (push "pulled" parts))
+         (when pushed (push "pushed" parts))
+         (when (and (numberp corrected) (> corrected 0))
+           (push (format "%d blocked flag%s repaired"
+                         corrected (if (= corrected 1) "" "s"))
+                 parts))
+         (if parts
+             (format "Beads synced (%s)" (string-join (nreverse parts) ", "))
+           "Beads synced (up to date)")))
+      (_ "Beads synced"))))
+
+(defun beady--format-sync-failure (msg exit stdout)
+  "Return a human-readable message for a failed `bd sync'.
+MSG is the default error message, EXIT the exit status and STDOUT the
+output of `bd sync --json'."
+  (let* ((json (ignore-errors (beady--parse-json stdout)))
+         (tables (and (listp json) (consp (car-safe json))
+                      (alist-get 'conflicts json))))
+    (pcase exit
+      (2 (format "Beads sync halted on merge conflict%s; inspect with M-x beady-conflicts"
+                 (if (and (listp tables) tables)
+                     (format " in %s" (string-join tables ", "))
+                   "")))
+      (3 "Beads sync: retries exhausted (push race or busy working set); try again")
+      (4 "Beads sync halted: dirty working set is stuck; commit or clear pending changes")
+      (_ (format "Beads sync failed: %s" msg)))))
+
+;;;###autoload
+(defun beady-sync (&optional args)
+  "Synchronize the current Beads project with its Dolt remote.
+Runs `bd sync' asynchronously (pull, conflict check, recompute
+blocked flags and push) and refreshes open beady buffers when done.
+ARGS are additional flags from `beady-sync-menu'."
+  (interactive (list (beady--sync-args)))
+  (let* ((root (beady--current-root))
+         (default-directory root)
+         (flags (seq-filter (lambda (a)
+                              (or (string-prefix-p "--remote=" a)
+                                  (member a '("--no-adopt" "--yes"))))
+                            args)))
+    (message "Syncing %s…" (beady--project-name root))
+    (beady--run-async
+     (append '("--json" "sync") flags)
+     (lambda (stdout)
+       (beady-refresh-buffers root)
+       (message "%s" (beady--format-sync-result (beady--parse-json stdout))))
+     (lambda (msg exit stdout _stderr)
+       (beady-refresh-buffers root)
+       (message "%s" (beady--format-sync-failure msg exit stdout))))))
+
+(defun beady-dolt-pull (&optional args)
+  "Pull commits from the Dolt remote into the current Beads project.
+ARGS are additional flags from `beady-sync-menu'."
+  (interactive (list (beady--sync-args)))
+  (let* ((root (beady--current-root))
+         (default-directory root)
+         (flags (seq-filter (lambda (a)
+                              (or (string-prefix-p "--remote=" a)
+                                  (string-prefix-p "--strategy=" a)))
+                            args)))
+    (message "Pulling %s…" (beady--project-name root))
+    (beady--run-async
+     (append '("dolt" "pull") flags)
+     (lambda (_stdout)
+       (beady-refresh-buffers root)
+       (message "Pulled %s" (beady--project-name root)))
+     (lambda (msg &rest _)
+       (beady-refresh-buffers root)
+       (message "Pull failed: %s" msg)))))
+
+(defun beady-dolt-push (&optional args)
+  "Push local Dolt commits of the current Beads project to its remote.
+ARGS are additional flags from `beady-sync-menu'."
+  (interactive (list (beady--sync-args)))
+  (let* ((root (beady--current-root))
+         (default-directory root)
+         (flags (seq-filter (lambda (a)
+                              (or (string-prefix-p "--remote=" a)
+                                  (member a '("--force" "--no-adopt" "--yes"))))
+                            args)))
+    (when (and (member "--force" flags)
+               (not (yes-or-no-p (format "Force push %s (overwriting remote changes)? "
+                                         (beady--project-name root)))))
+      (user-error "Aborted"))
+    (message "Pushing %s…" (beady--project-name root))
+    (beady--run-async
+     (append '("dolt" "push") flags)
+     (lambda (_stdout)
+       (beady-refresh-buffers root)
+       (message "Pushed %s" (beady--project-name root)))
+     (lambda (msg &rest _)
+       (message "Push failed: %s" msg)))))
+
+(defun beady-vc-commit (message)
+  "Create a Dolt commit with MESSAGE for pending changes in the project."
+  (interactive (list (read-string "Commit message: ")))
+  (when (string-blank-p message) (user-error "A commit message is required"))
+  (let* ((root (beady--current-root))
+         (default-directory root)
+         (json (beady--run-json (list "vc" "commit" (concat "--message=" message)))))
+    (beady-refresh-buffers root)
+    (if (alist-get 'committed json)
+        (let ((hash (or (alist-get 'hash json) "")))
+          (message "Committed %s: %s"
+                   (substring hash 0 (min 8 (length hash))) message))
+      (message "%s" (or (alist-get 'message json) "Nothing to commit")))))
+
+(defun beady-dolt-remote-add (name url)
+  "Add a Dolt remote called NAME pointing to URL."
+  (interactive
+   (list (read-string "Remote name (e.g. origin): "
+                      (unless (beady--remotes) "origin"))
+         (read-string "Remote URL: ")))
+  (when (string-blank-p name) (user-error "A remote name is required"))
+  (when (string-blank-p url) (user-error "A remote URL is required"))
+  (let* ((root (beady--current-root))
+         (default-directory root))
+    (beady--run (list "dolt" "remote" "add" name url))
+    (message "Added remote %s → %s" name url)))
+
+(defun beady-dolt-remote-remove (name)
+  "Remove the Dolt remote called NAME."
+  (interactive
+   (let ((remotes (mapcar (lambda (r) (alist-get 'name r)) (beady--remotes))))
+     (unless remotes (user-error "No Dolt remotes configured"))
+     (list (completing-read "Remove remote: " remotes nil t))))
+  (when (string-blank-p name) (user-error "No remote given"))
+  (let* ((root (beady--current-root))
+         (default-directory root))
+    (beady--run (list "dolt" "remote" "remove" name))
+    (message "Removed remote %s" name)))
+
+(defun beady-vc-status ()
+  "Display the version control, Dolt engine, remote and conflict status."
+  (interactive)
+  (let* ((root (beady--current-root))
+         (default-directory root)
+         (name (beady--project-name root))
+         (vc (ignore-errors (beady--run-json '("vc" "status"))))
+         (dolt (ignore-errors (beady--run-json '("dolt" "status"))))
+         (remotes (beady--remotes root))
+         (conflicts (ignore-errors (beady--run-json '("conflicts" "list"))))
+         (buffer (get-buffer-create (format "*beady vc: %s*" name))))
+    (with-current-buffer buffer
+      (special-mode)
+      (setq default-directory root
+            beady--root root
+            revert-buffer-function (lambda (&rest _) (beady-vc-status)))
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize (format "Beads version control — %s\n\n" name) 'face 'bold))
+        (when (and (listp vc) (consp (car-safe vc)))
+          (insert (propertize "Branch    " 'face 'beady-field-name)
+                  (or (alist-get 'branch vc) "?") "\n"
+                  (propertize "Commit    " 'face 'beady-field-name)
+                  (propertize (or (alist-get 'commit vc) "?") 'face 'beady-id) "\n"))
+        (when (and (listp dolt) (consp (car-safe dolt)))
+          (insert (propertize "Engine    " 'face 'beady-field-name)
+                  (or (alist-get 'mode dolt) "?")
+                  (if (alist-get 'server_running dolt) " (server running)" "")
+                  "\n")
+          (when-let* ((dir (alist-get 'data_dir dolt)))
+            (insert (propertize "Data dir  " 'face 'beady-field-name)
+                    (abbreviate-file-name dir) "\n")))
+        (insert "\n" (propertize "Remotes\n" 'face 'beady-section-heading))
+        (if (null remotes)
+            (insert (propertize "  None configured\n" 'face 'beady-dim))
+          (dolist (remote remotes)
+            (let-alist remote
+              (insert "  " (propertize (or .name "?") 'face 'bold)
+                      "  " (or .url "")
+                      (if (and .status (not (equal .status "ok")))
+                          (concat "  " (propertize (format "[%s]" .status) 'face 'warning))
+                        "")
+                      "\n"))))
+        (insert "\n" (propertize "Conflicts\n" 'face 'beady-section-heading))
+        (let* ((count (or (and (listp conflicts) (alist-get 'conflicts conflicts)) 0))
+               (tables (and (listp conflicts) (alist-get 'tables conflicts)))
+               (merging (and (listp conflicts)
+                             (alist-get 'merging (alist-get 'blockers conflicts)))))
+          (if (and (eql count 0) (not merging))
+              (insert (propertize "  No merge conflicts\n" 'face 'beady-dim))
+            (insert (propertize (format "  %d conflict%s%s\n"
+                                        count (if (= count 1) "" "s")
+                                        (if merging " (merge in progress)" ""))
+                                'face 'warning))
+            (dolist (tbl tables)
+              (let-alist tbl
+                (insert (format "    %-14s %d\n" (or .table "?") (or .count 0)))))))
+        (goto-char (point-min))))
+    (display-buffer buffer beady-display-buffer-action)))
+
+(defun beady--format-conflict-value (exists value)
+  "Format a conflict side cell given EXISTS and VALUE."
+  (cond ((not exists) (propertize "(deleted)" 'face 'beady-dim))
+        ((null value) (propertize "null" 'face 'beady-dim))
+        ((stringp value) value)
+        (t (format "%S" value))))
+
+(defun beady-conflicts ()
+  "Display live merge conflicts of the current project."
+  (interactive)
+  (let* ((root (beady--current-root))
+         (default-directory root)
+         (name (beady--project-name root))
+         (list-json (beady--run-json '("conflicts" "list")))
+         (show-json (beady--run-json '("conflicts" "show")))
+         (count (or (alist-get 'conflicts show-json)
+                    (alist-get 'conflicts list-json) 0))
+         (rows (alist-get 'rows show-json))
+         (merging (alist-get 'merging (alist-get 'blockers list-json)))
+         (buffer (get-buffer-create (format "*beady conflicts: %s*" name))))
+    (with-current-buffer buffer
+      (special-mode)
+      (setq default-directory root
+            beady--root root
+            revert-buffer-function (lambda (&rest _) (beady-conflicts)))
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize (format "Beads merge conflicts — %s\n\n" name) 'face 'bold))
+        (if (and (eql count 0) (null rows) (not merging))
+            (insert (propertize "No merge conflicts.\n" 'face 'beady-dim))
+          (when (and (eql count 0) merging)
+            (insert (propertize "All conflicts resolved; merge is open (conclude it in the sync menu).\n\n"
+                                'face 'warning)))
+          (dolist (row rows)
+            (let-alist row
+              (insert (propertize (or .table "issues") 'face 'beady-section-heading)
+                      " "
+                      (propertize (or .issue_id .key "?") 'face 'beady-id)
+                      (if (or .our_diff_type .their_diff_type)
+                          (propertize (format "  (ours: %s, theirs: %s)"
+                                              (or .our_diff_type "?")
+                                              (or .their_diff_type "?"))
+                                      'face 'beady-dim)
+                        "")
+                      "\n")
+              (dolist (field .fields)
+                (let-alist field
+                  (insert "  " (propertize (string-pad (or .field .column .name "?") 16)
+                                           'face 'beady-field-name)
+                          "\n"
+                          "    base:   " (beady--format-conflict-value
+                                          (if (assq 'base_exists field) .base_exists t) .base)
+                          "\n"
+                          "    ours:   " (beady--format-conflict-value
+                                          (if (assq 'our_exists field) .our_exists t) .ours)
+                          "\n"
+                          "    theirs: " (beady--format-conflict-value
+                                          (if (assq 'their_exists field) .their_exists t) .theirs)
+                          "\n")))
+              (insert "\n"))))
+        (goto-char (point-min))))
+    (display-buffer buffer beady-display-buffer-action)))
+
+(defun beady--resolve-conflicts (strategy)
+  "Resolve all live merge conflicts using STRATEGY (\"ours\" or \"theirs\")."
+  (unless (yes-or-no-p (format "Resolve all merge conflicts keeping %s side? " strategy))
+    (user-error "Aborted"))
+  (let* ((root (beady--current-root))
+         (default-directory root))
+    (beady--run (list "conflicts" "resolve" "--all" (concat "--" strategy)))
+    (beady-refresh-buffers root)
+    (when-let* ((buf (get-buffer (format "*beady conflicts: %s*" (beady--project-name root)))))
+      (with-current-buffer buf (revert-buffer)))
+    (message "Resolved conflicts keeping %s" strategy)))
+
+(defun beady-conflicts-resolve-ours ()
+  "Resolve all live merge conflicts keeping our side."
+  (interactive)
+  (beady--resolve-conflicts "ours"))
+
+(defun beady-conflicts-resolve-theirs ()
+  "Resolve all live merge conflicts taking their side."
+  (interactive)
+  (beady--resolve-conflicts "theirs"))
+
+(defun beady-conflicts-conclude ()
+  "Commit an open merge whose conflicts have been resolved."
+  (interactive)
+  (let* ((root (beady--current-root))
+         (default-directory root))
+    (beady--run '("conflicts" "resolve" "--conclude"))
+    (beady-refresh-buffers root)
+    (message "Concluded merge")))
+
+(defun beady--sync-heading ()
+  "Return the transient heading for `beady-sync-menu'."
+  (let* ((root (beady--current-root))
+         (default-directory root)
+         (vc (ignore-errors (beady--run-json '("vc" "status"))))
+         (remotes (beady--remotes root))
+         (conflicts (ignore-errors (beady--run-json '("conflicts" "list"))))
+         (branch (and (listp vc) (alist-get 'branch vc)))
+         (commit (and (listp vc) (alist-get 'commit vc)))
+         (nconf (or (and (listp conflicts) (alist-get 'conflicts conflicts)) 0))
+         (merging (and (listp conflicts)
+                       (alist-get 'merging (alist-get 'blockers conflicts)))))
+    (concat (propertize "Sync " 'face 'transient-heading)
+            (propertize (beady--project-name root) 'face 'bold)
+            (if branch
+                (concat "  " (propertize branch 'face 'transient-value)
+                        (if (and (stringp commit) (>= (length commit) 8))
+                            (propertize (concat "@" (substring commit 0 8)) 'face 'beady-dim)
+                          ""))
+              "")
+            "  "
+            (if remotes
+                (mapconcat (lambda (r)
+                             (concat (propertize (or (alist-get 'name r) "?") 'face 'beady-id)
+                                     ":" (truncate-string-to-width
+                                          (or (alist-get 'url r) "") 40 nil nil "…")))
+                           remotes ", ")
+              (propertize "no remote" 'face 'transient-inactive-value))
+            (cond ((> nconf 0)
+                   (concat "  " (propertize (format "%d conflict%s" nconf (if (= nconf 1) "" "s"))
+                                            'face 'error)))
+                  (merging
+                   (concat "  " (propertize "merge in progress" 'face 'warning)))
+                  (t "")))))
+
+;;;###autoload
+(transient-define-prefix beady-sync-menu ()
+  "Synchronize and manage the Dolt database of the current Beads project."
+  [:description beady--sync-heading
+   ["Options"
+    ("-r" "Remote" "--remote=" :reader beady--transient-read-remote)
+    ("-s" "Pull conflict strategy" "--strategy=" :choices ("ours" "theirs"))
+    ("-f" "Force push" "--force")
+    ("-n" "Do not adopt git origin" "--no-adopt")
+    ("-y" "Adopt git origin without asking" "--yes")]
+   ["Synchronize"
+    ("s" "Sync (pull + repair + push)" beady-sync)
+    ("F" "Pull from remote" beady-dolt-pull)
+    ("P" "Push to remote" beady-dolt-push)
+    ("c" "Commit pending changes…" beady-vc-commit)
+    ("v" "Version control status" beady-vc-status)]
+   ["Remotes & conflicts"
+    ("a" "Add remote…" beady-dolt-remote-add)
+    ("D" "Remove remote…" beady-dolt-remote-remove)
+    ("x" "Show conflicts" beady-conflicts)
+    ("O" "Resolve all keeping ours" beady-conflicts-resolve-ours)
+    ("T" "Resolve all taking theirs" beady-conflicts-resolve-theirs)
+    ("M" "Conclude resolved merge" beady-conflicts-conclude)]]
+  (interactive)
+  (beady--current-root)
+  (transient-setup 'beady-sync-menu))
+
+
 ;;;; Misc
 
 (defun beady-copy-id (ids)
