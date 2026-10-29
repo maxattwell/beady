@@ -78,6 +78,8 @@ when no project is found, ask for the directory."
 
 ;;;###autoload (autoload 'beady-create-menu "beady" "Create a new bead." t)
 ;;;###autoload (autoload 'beady-show-issue "beady" "Show a bead by ID." t)
+;;;###autoload (autoload 'beady-sync "beady" "Synchronize the current Beads project with its Dolt remote." t)
+;;;###autoload (autoload 'beady-sync-menu "beady" "Synchronize and manage the Dolt database of the current Beads project." t)
 
 (provide 'beady)
 ;;; beady.el ends here

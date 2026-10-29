@@ -340,8 +340,9 @@ readable message when bd fails."
 (defun beady--run-async (args callback &optional errback)
   "Run bd with ARGS asynchronously in `default-directory'.
 Call CALLBACK with the standard output when bd succeeds, or ERRBACK
-with an error message when it fails.  ERRBACK defaults to displaying
-the message.  Return the process object."
+with an error message when it fails.  ERRBACK receives three optional
+extra arguments: the exit status, stdout and stderr.  It defaults to
+displaying the message.  Return the process object."
   (let* ((out (generate-new-buffer " *beady-out*" t))
          (err (generate-new-buffer " *beady-err*" t))
          (full (beady--full-args args))
@@ -370,9 +371,12 @@ the message.  Return the process object."
                       ((and (eq (process-status proc) 'exit) (eql exit 0))
                        (funcall callback stdout))
                       (t
-                       (funcall (or errback
-                                    (lambda (msg) (message "beady: %s" msg)))
-                                (beady--error-message stderr stdout exit))))))
+                       (let ((msg (beady--error-message stderr stdout exit))
+                             (fn (or errback
+                                     (lambda (m &rest _) (message "beady: %s" m)))))
+                         (if (equal (cdr (func-arity fn)) 1)
+                             (funcall fn msg)
+                           (funcall fn msg exit stdout stderr)))))))
                (kill-buffer out)
                (kill-buffer err)))))
       (file-error

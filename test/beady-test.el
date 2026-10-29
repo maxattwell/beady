@@ -345,7 +345,7 @@
     (should (equal beady-list-columns beady-list--columns-compact))
     (beady-list-toggle-column-profile)
     (should (equal beady-list-columns beady-list--columns-wide))
-    (should (string-match-p "ID +Pri Status +Type +Assignee Age Title"
+    (should (string-match-p "ID +Pri Status +Type +Assignee Age +Title"
                             beady-list--header))
     (beady-list-toggle-column-profile)
     (should (equal beady-list-columns beady-list--columns-compact))))
@@ -757,6 +757,95 @@
             (beady-show-back)
             (should (equal beady-show--id task))))))))
 
+;;;; Sync
+
+(ert-deftest beady-test-format-sync-result ()
+  (should (equal (beady--format-sync-result '((status . "no-remote")))
+                 "Beads sync: no remote configured"))
+  (should (equal (beady--format-sync-result '((status . "ok") (pulled) (pushed)))
+                 "Beads synced (up to date)"))
+  (should (equal (beady--format-sync-result '((status . "ok") (pulled . t) (pushed . t)
+                                              (rows_corrected . 2)))
+                 "Beads synced (pulled, pushed, 2 blocked flags repaired)"))
+  (should (equal (beady--format-sync-result '((status . "ok") (rows_corrected . 1)))
+                 "Beads synced (1 blocked flag repaired)")))
+
+(ert-deftest beady-test-format-sync-failure ()
+  (should (equal (beady--format-sync-failure
+                  "exit 2" 2 "{\"status\":\"conflict\",\"conflicts\":[\"issues\"]}")
+                 "Beads sync halted on merge conflict in issues; inspect with M-x beady-conflicts"))
+  (should (equal (beady--format-sync-failure "exit 3" 3 "")
+                 "Beads sync: retries exhausted (push race or busy working set); try again"))
+  (should (equal (beady--format-sync-failure "exit 4" 4 "")
+                 "Beads sync halted: dirty working set is stuck; commit or clear pending changes"))
+  (should (equal (beady--format-sync-failure "network down" 1 "")
+                 "Beads sync failed: network down")))
+
+(ert-deftest beady-test-vc-status-and-conflicts-buffers ()
+  (beady-test-with-list
+    (let ((name (beady--project-name root)))
+      (unwind-protect
+          (cl-letf (((symbol-function 'beady--run-json)
+                     (lambda (args)
+                       (pcase args
+                         ('("vc" "status") '((branch . "main") (commit . "0123456789abcdef")))
+                         ('("dolt" "status") '((mode . "embedded") (data_dir . "/tmp/dolt")))
+                         ('("dolt" "remote" "list")
+                          '(((name . "origin") (url . "file:///tmp/rem") (status . "ok"))))
+                         ('("conflicts" "list")
+                          '((conflicts . 1) (tables ((table . "issues") (count . 1)))
+                            (blockers (merging . t))))
+                         ('("conflicts" "show")
+                          '((conflicts . 1)
+                            (rows ((table . "issues")
+                                   (issue_id . "a-1")
+                                   (our_diff_type . "modified")
+                                   (their_diff_type . "modified")
+                                   (fields ((field . "title")
+                                            (base_exists . t) (base . "Old")
+                                            (our_exists . t) (ours . "Mine")
+                                            (their_exists . t) (theirs . "Theirs")))))))))))
+            (beady-vc-status)
+            (with-current-buffer (get-buffer (format "*beady vc: %s*" name))
+              (let ((text (buffer-string)))
+                (should (string-match-p "Branch +main" text))
+                (should (string-match-p "Commit +0123456789abcdef" text))
+                (should (string-match-p "Engine +embedded" text))
+                (should (string-match-p "origin +file:///tmp/rem" text))
+                (should (string-match-p "1 conflict (merge in progress)" text))))
+            (beady-conflicts)
+            (with-current-buffer (get-buffer (format "*beady conflicts: %s*" name))
+              (let ((text (buffer-string)))
+                (should (string-match-p "issues a-1  (ours: modified, theirs: modified)" text))
+                (should (string-match-p "base:   Old" text))
+                (should (string-match-p "ours:   Mine" text))
+                (should (string-match-p "theirs: Theirs" text))))
+            (let ((heading (beady--sync-heading)))
+              (should (string-match-p "main@01234567" heading))
+              (should (string-match-p "origin:file:///tmp/rem" heading))
+              (should (string-match-p "1 conflict" heading))))
+        (when-let* ((b (get-buffer (format "*beady vc: %s*" name)))) (kill-buffer b))
+        (when-let* ((b (get-buffer (format "*beady conflicts: %s*" name)))) (kill-buffer b))))))
+
+(ert-deftest beady-test-sync-menu-keys ()
+  (beady-test-with-list
+    (should (eq (key-binding (kbd "S")) 'beady-sync-menu))
+    (switch-to-buffer (current-buffer))
+    (cl-letf (((symbol-function 'beady--run-json) (lambda (_args) nil)))
+      (beady-sync-menu)
+      (unwind-protect
+          (progn
+            (should (eq (lookup-key transient--transient-map (kbd "s")) 'beady-sync))
+            (should (eq (lookup-key transient--transient-map (kbd "F")) 'beady-dolt-pull))
+            (should (eq (lookup-key transient--transient-map (kbd "P")) 'beady-dolt-push))
+            (should (eq (lookup-key transient--transient-map (kbd "c")) 'beady-vc-commit))
+            (should (eq (lookup-key transient--transient-map (kbd "v")) 'beady-vc-status))
+            (should (eq (lookup-key transient--transient-map (kbd "a")) 'beady-dolt-remote-add))
+            (should (eq (lookup-key transient--transient-map (kbd "D")) 'beady-dolt-remote-remove))
+            (should (eq (lookup-key transient--transient-map (kbd "x")) 'beady-conflicts)))
+        (transient--emergency-exit)))))
+
+
 (ert-deftest beady-test-integration-errors ()
   (skip-unless (executable-find "bd"))
   (let ((dir (file-name-as-directory (make-temp-file "beady-nodb" t))))
@@ -767,6 +856,38 @@
               (beady--run-json '("list"))
             (beady-error (should (string-match-p "no beads database" (cadr err))))))
       (delete-directory dir t))))
+
+(ert-deftest beady-test-integration-sync ()
+  (skip-unless (executable-find "bd"))
+  (beady-test-with-db
+    (let ((remote-dir (file-name-as-directory (file-truename (make-temp-file "beady-remote" t))))
+          (messages nil))
+      (unwind-protect
+          (progn
+            (beady-dolt-remote-add "origin" (concat "file://" remote-dir))
+            (should (equal (alist-get 'name (car (beady--remotes dir))) "origin"))
+            (beady-create "Synced task" '("--type=task"))
+            (cl-letf (((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (push (apply #'format fmt args) messages))))
+              (beady-dolt-push)
+              (beady-test--wait
+               (lambda ()
+                 (seq-some (lambda (m) (string-match-p "\\`Pushed " m)) messages)))
+              (setq messages nil)
+              (beady-dolt-pull)
+              (beady-test--wait
+               (lambda ()
+                 (seq-some (lambda (m) (string-match-p "\\`Pulled " m)) messages)))
+              (setq messages nil)
+              (beady-sync)
+              (beady-test--wait
+               (lambda ()
+                 (seq-some (lambda (m) (string-match-p "Beads synced" m)) messages))))
+            (beady-dolt-remote-remove "origin")
+            (should-not (beady--remotes dir)))
+        (delete-directory remote-dir t)))))
+
 
 ;;;; Evil
 
@@ -783,6 +904,7 @@
                        ("x" . beady-close)
                        ("v" . beady-list-view-menu)
                        ("/" . beady-list-search)
+                       ("S" . beady-sync-menu)
                        ("?" . beady-list-dispatch)
                        ("gr" . beady-list-refresh)
                        ("za" . beady-list-toggle-group)
@@ -831,6 +953,7 @@
                        ("]]" . beady-show-next-section)
                        ("gr" . beady-show-refresh)
                        ("s" . beady-status-menu)
+                       ("S" . beady-sync-menu)
                        ("?" . beady-show-dispatch)))
       (should (eq (key-binding (kbd (car binding))) (cdr binding)))))
   (with-temp-buffer
