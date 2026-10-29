@@ -1,128 +1,72 @@
-# Agent Instructions
+# AGENTS.md — `beady`
 
-This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
+`beady` is an Emacs interface for [Beads (`bd`)](https://github.com/gastownhall/beads), the distributed, dependency-aware issue tracker for AI agents. Requires Emacs 29.1+ and `transient` (0.4.1+); optional integrations exist for `evil` and `markdown-mode`.
 
-> **Architecture in one line:** Issues live in a local Dolt database
-> (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a
-> git-compatible protocol), stored under `refs/dolt/data` on your git
-> remote — separate from `refs/heads/*` where your code lives.
-> `.beads/issues.jsonl` is a passive export, not the wire protocol.
->
-> See [sync-concepts](https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md)
-> for the one-screen overview and anti-patterns (don't treat JSONL as the
-> source of truth; don't `bd import` during normal operation; don't
-> reach for third-party Dolt hosting before trying the default).
+## Architecture & Module Map
 
-## Quick Reference
+- **`beady.el`** — Package entry point and autoloaded commands (`beady`, `beady-show-issue`, `beady-create-menu`).
+- **`beady-core.el`** — Customization options, faces, project root discovery (`.beads`), status/type metadata caches, formatting helpers, and process execution (`beady--run`, `beady--run-json`, `beady--run-async`).
+- **`beady-list.el`** — `beady-list-mode`: read-only project board. Loads issues asynchronously in parallel (`bd list`, `bd blocked`, `bd statuses`); all filtering, live search, sorting, grouping (including kanban board lanes), and hierarchical tree rendering happen locally in memory. Includes `beady-list-view-menu` (`v`) and `beady-list-dispatch` (`?`).
+- **`beady-show.el`** — `beady-show-mode`: single-bead detail view with Markdown rendering, clickable relation buttons (parent/children/blockers/related), back/forward navigation history, and follow mode preview.
+- **`beady-actions.el`** — Interactive mutations (status transitions, priority, claim/unclaim, labels, assignee, dependencies, field edits, creation) and `beady-compose-mode` buffers for multi-line Markdown comments/descriptions.
+- **`beady-evil.el`** — Optional Evil keybindings following `evil-collection` conventions; auto-installed when `evil` is loaded and `beady-evil-integration` is non-nil.
+- **`test/beady-test.el`** — ERT test suite: fast unit tests on synthetic fixtures (`beady-test-with-list`) plus integration tests against a temporary `bd` database.
+
+## Code Conventions
+
+- **Strictly use `bd --json`:** Never parse human-readable `bd` output for structured data. All reads go through `beady--run-json` or `beady--run-async` with `--json`; mutations go through `beady--mutate` (which handles `--force` confirmation prompts and refreshes all open project buffers via `beady-refresh-project`).
+- **Emacs Lisp standards:**
+  - Every file uses `lexical-binding: t`, `cl-lib`, `seq`, and `subr-x` (never deprecated `cl`).
+  - Prefix public symbols with `beady-` (or `beady-list-`, `beady-show-`, `beady-compose-`) and private helpers/state with `--`.
+  - Buffer-local state must use `defvar-local`.
+  - Guard optional dependencies (`evil`, `markdown-mode`) with `declare-function` and `fboundp` / `featurep` so core files byte-compile cleanly without them.
+- **UI & keybindings:** Keep Emacs and Evil bindings in sync, update transient menus (`beady-list-dispatch`, `beady-show-dispatch`) when adding commands, and preserve cached key-hint headers (`beady--hints`).
+
+## Build, Test & Lint
+
+With `make` available:
 
 ```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work atomically
-bd close <id>         # Complete work
-bd dolt push          # Push beads data to remote
+make compile   # Byte-compile with byte-compile-error-on-warn = t
+make test      # Run ERT unit + integration tests
+make lint      # Run checkdoc and package-lint
 ```
 
-## Non-Interactive Shell Commands
+Direct `emacs -Q --batch` commands (when `make` is not in `PATH` or when testing single files):
 
-**ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
-
-Shell commands like `cp`, `mv`, and `rm` may be aliased to include `-i` (interactive) mode on some systems, causing the agent to hang indefinitely waiting for y/n input.
-
-**Use these forms instead:**
 ```bash
-# Force overwrite without prompting
-cp -f source dest           # NOT: cp source dest
-mv -f source dest           # NOT: mv source dest
-rm -f file                  # NOT: rm file
+# Byte-compile core files (warnings are errors)
+emacs -Q --batch -L . --eval '(setq byte-compile-error-on-warn t)' \
+  -f batch-byte-compile beady-core.el beady-actions.el beady-show.el beady-list.el beady.el
 
-# For recursive operations
-rm -rf directory            # NOT: rm -r directory
-cp -rf source dest          # NOT: cp -r source dest
+# Run all ERT tests (or replace `t` with a selector like `"beady-test-filter"`)
+emacs -Q --batch -L . -L test -l test/beady-test.el \
+  --eval '(ert-run-tests-batch-and-exit (quote (not (tag :integration))))'
+
+# Run full ERT suite including bd CLI integration tests
+emacs -Q --batch -L . -L test -l test/beady-test.el -f ert-run-tests-batch-and-exit
+
+# Checkdoc lint
+emacs -Q --batch -L . --eval '(dolist (f (quote ("beady-core.el" "beady-actions.el" "beady-show.el" "beady-list.el" "beady.el" "beady-evil.el"))) (checkdoc-file f))'
 ```
 
-**Other commands that may prompt:**
-- `scp` - use `-o BatchMode=yes` for non-interactive
-- `ssh` - use `-o BatchMode=yes` to fail instead of prompting
-- `apt-get` - use `-y` flag
-- `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
+Pass extra package directories (for `evil`, `markdown-mode`, `package-lint`) with `LOAD_PATH="-L /path/to/pkg"` or extra `-L` flags.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:46cd31e7 -->
-## Beads Issue Tracker
+## Beads Issue Tracker (`bd`)
 
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
-
-### Quick Reference
+This project tracks its own issues with **Beads (`bd`)** in `.beads/`. Run `bd prime` for full workflow context.
 
 ```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
+bd ready                # List actionable work (open, unblocked)
+bd list                 # List open issues
+bd show <id>            # View issue details & dependencies
+bd update <id> --claim  # Claim an issue atomically
+bd close <id>           # Close completed work
+bd memories             # List persistent project memories
+bd remember "<insight>" # Store a durable project insight
 ```
 
-### Rules
-
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
-
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md for details and anti-patterns.
-
-## Agent Context Profiles
-
-The managed Beads block is task-tracking guidance, not permission to override repository, user, or orchestrator instructions.
-
-- **Conservative (default)**: Use `bd` for task tracking. Do not run git commits, git pushes, or Dolt remote sync unless explicitly asked. At handoff, report changed files, validation, and suggested next commands.
-- **Minimal**: Keep tool instruction files as pointers to `bd prime`; use the same conservative git policy unless active instructions say otherwise.
-- **Team-maintainer**: Only when the repository explicitly opts in, agents may close beads, run quality gates, commit, and push as part of session close. A current "do not commit" or "do not push" instruction still wins.
-
-## Session Completion
-
-This protocol applies when ending a Beads implementation workflow. It is subordinate to explicit user, repository, and orchestrator instructions.
-
-1. **File issues for remaining work** - Create beads for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **Handle git/sync by active profile**:
-   ```bash
-   # Conservative/minimal/default: report status and proposed commands; wait for approval.
-   git status
-
-   # Team-maintainer opt-in only, unless current instructions forbid it:
-   git pull --rebase
-   bd dolt push
-   git push
-   git status
-   ```
-5. **Hand off** - Summarize changes, validation, issue status, and any blocked sync/commit/push step
-
-**Critical rules:**
-- Explicit user or orchestrator instructions override this Beads block.
-- Do not commit or push without clear authority from the active profile or the current user request.
-- If a required sync or push is blocked, stop and report the exact command and error.
+- Use `bd` for project issue tracking (`beady-<hash>`).
+- Do not commit, push, or run `bd sync` / `bd dolt push` unless asked by the user.
 <!-- END BEADS INTEGRATION -->
-
-<!-- BEGIN BEADS CODEX SETUP: generated by bd setup codex -->
-## Beads Issue Tracker
-
-Use Beads (`bd`) for durable task tracking in repositories that include it. Use the `beads` skill at `.agents/skills/beads/SKILL.md` (project install) or `~/.agents/skills/beads/SKILL.md` (global install) for Beads workflow guidance, then use the `bd` CLI for issue operations.
-
-### Quick Reference
-
-```bash
-bd ready                # Find available work
-bd show <id>            # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>           # Complete work
-bd prime                # Refresh Beads context
-```
-
-### Rules
-
-- Use `bd` for all task tracking; do not create markdown TODO lists.
-- Run `bd prime` when Beads context is missing or stale. Codex 0.129.0+ can load Beads context automatically through native hooks; use `/hooks` to inspect or toggle them.
-- Keep persistent project memory in Beads via `bd remember`; do not create ad hoc memory files.
-
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md for details and anti-patterns.
-<!-- END BEADS CODEX SETUP -->
